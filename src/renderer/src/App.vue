@@ -1,12 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import logoUrl from './assets/logo.svg'
 
-type ViewState = 'home' | 'loading' | 'offline'
+type ShellView = 'home' | 'loading' | 'offline' | 'remote'
 
-const view = ref<ViewState>(
-  location.hash.includes('offline') ? 'offline' : location.hash.includes('home') ? 'home' : 'loading'
-)
+const view = ref<ShellView>('home')
 const error = ref<string | null>(null)
 const url = ref('')
 const addressInput = ref('')
@@ -14,13 +12,25 @@ const addressError = ref('')
 /** 历史打开过的地址，最近的在最前 */
 const history = ref<string[]>([])
 
+/** 工具栏只在远程内容相关状态下出现（地址输入页本身是完整界面，无需工具栏） */
+const showToolbar = computed(() => view.value !== 'home')
+
+async function loadHistory(): Promise<void> {
+  const shellApi = window.nativeShell
+  if (!shellApi) return
+  try {
+    history.value = await shellApi.getHistory()
+  } catch {
+    // 历史读取失败不影响地址输入
+  }
+}
+
 onMounted(async () => {
   const shellApi = window.nativeShell
   if (!shellApi) return
   try {
     const state = await shellApi.getAppState()
-    if (state.state === 'offline') view.value = 'offline'
-    else if (view.value !== 'home') view.value = 'loading'
+    view.value = state.view
     error.value = state.lastError
     url.value = state.url
     // 地址输入页默认带出配置地址
@@ -28,12 +38,27 @@ onMounted(async () => {
   } catch {
     // IPC 不可用时保持默认视图
   }
-  try {
-    history.value = await shellApi.getHistory()
-  } catch {
-    // 历史读取失败不影响地址输入
-  }
+  // 壳子界面常驻，视图切换由主进程推送驱动
+  shellApi.onViewChange((state) => {
+    view.value = state.view
+    error.value = state.lastError
+    url.value = state.url
+    if (state.view === 'home') void loadHistory()
+  })
+  void loadHistory()
 })
+
+/** 工具栏：刷新（离线重试 / 远程页刷新 / 地址页刷新，由主进程按状态决定） */
+function refresh(): void {
+  window.nativeShell?.reloadPage()
+}
+
+/** 工具栏：返回地址输入页 */
+function goHome(): void {
+  view.value = 'home'
+  void loadHistory()
+  window.nativeShell?.backHome()
+}
 
 /** 一键清空输入框（也支持在输入框内按 Esc） */
 function clearInput(): void {
@@ -93,95 +118,170 @@ async function retry(): Promise<void> {
   view.value = 'loading'
   await window.nativeShell?.retryLoad()
 }
-
-/** 返回地址输入页（快捷键 Alt+Left / 离线页按钮） */
-function backHome(): void {
-  view.value = 'home'
-  window.nativeShell?.backHome()
-}
 </script>
 
 <template>
-  <main class="container">
-    <template v-if="view === 'home'">
-      <img class="logo" :src="logoUrl" alt="应用 logo" />
-      <h1 class="title">输入应用地址</h1>
-      <form class="address-form" @submit.prevent="openAddress">
-        <div class="input-wrap">
-          <input
-            v-model="addressInput"
-            class="address-input"
-            type="text"
-            placeholder="http://192.168.1.100:5173"
-            spellcheck="false"
-            autofocus
-            @keydown.esc="clearInput"
-          />
-          <button
-            v-if="addressInput"
-            class="clear-btn"
-            type="button"
-            title="清空输入（Esc）"
-            @click="clearInput"
-          >
-            ✕
-          </button>
-        </div>
-        <button class="open-btn" type="submit">打开</button>
-      </form>
-      <p class="error" v-if="addressError">{{ addressError }}</p>
+  <div class="shell">
+    <!-- 顶部工具栏：壳子自己的界面，位于远程内容视图之上，不受页面样式影响 -->
+    <header class="toolbar" v-if="showToolbar">
+      <button class="tool-btn" type="button" title="刷新 (F5)" @click="refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10" />
+          <polyline points="1 20 1 14 7 14" />
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+        </svg>
+      </button>
+      <button class="tool-btn" type="button" title="返回地址输入页 (Alt+←)" @click="goHome">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          <polyline points="9 22 9 12 15 12 15 22" />
+        </svg>
+      </button>
+      <span class="tool-url" :title="url">{{ url }}</span>
+    </header>
 
-      <section class="history" v-if="history.length">
-        <div class="history-head">
-          <span class="history-title">历史记录（{{ history.length }}）</span>
-          <button class="history-clear-all" type="button" @click="clearAllHistory">清空全部</button>
-        </div>
-        <ul class="history-list">
-          <li v-for="item in history" :key="item" class="history-item">
-            <button class="history-link" type="button" :title="item" @click="openFromHistory(item)">
-              {{ item }}
-            </button>
+    <main class="container" :class="{ 'with-toolbar': showToolbar }">
+      <template v-if="view === 'home'">
+        <img class="logo" :src="logoUrl" alt="应用 logo" />
+        <h1 class="title">输入应用地址</h1>
+        <form class="address-form" @submit.prevent="openAddress">
+          <div class="input-wrap">
+            <input
+              v-model="addressInput"
+              class="address-input"
+              type="text"
+              placeholder="http://192.168.1.100:5173"
+              spellcheck="false"
+              autofocus
+              @keydown.esc="clearInput"
+            />
             <button
-              class="history-del"
+              v-if="addressInput"
+              class="clear-btn"
               type="button"
-              title="删除这条记录"
-              @click="removeFromHistory(item)"
+              title="清空输入（Esc）"
+              @click="clearInput"
             >
               ✕
             </button>
-          </li>
-        </ul>
-      </section>
-    </template>
+          </div>
+          <button class="open-btn" type="submit">打开</button>
+        </form>
+        <p class="error" v-if="addressError">{{ addressError }}</p>
 
-    <template v-else-if="view === 'loading'">
-      <img class="logo logo-sm" :src="logoUrl" alt="应用 logo" />
-      <div class="spinner" aria-hidden="true"></div>
-      <p class="title">正在加载应用…</p>
-      <p class="hint">{{ url }}</p>
-    </template>
+        <section class="history" v-if="history.length">
+          <div class="history-head">
+            <span class="history-title">历史记录（{{ history.length }}）</span>
+            <button class="history-clear-all" type="button" @click="clearAllHistory">清空全部</button>
+          </div>
+          <ul class="history-list">
+            <li v-for="item in history" :key="item" class="history-item">
+              <button class="history-link" type="button" :title="item" @click="openFromHistory(item)">
+                {{ item }}
+              </button>
+              <button
+                class="history-del"
+                type="button"
+                title="删除这条记录"
+                @click="removeFromHistory(item)"
+              >
+                ✕
+              </button>
+            </li>
+          </ul>
+        </section>
+      </template>
 
-    <template v-else>
-      <h1 class="title">网络连接失败</h1>
-      <p class="error" v-if="error">{{ error }}</p>
-      <p class="hint">请检查网络连接后重试</p>
-      <div class="btn-row">
-        <button class="retry-btn" type="button" @click="retry">重新加载</button>
-        <button class="back-btn" type="button" @click="backHome">返回地址页</button>
-      </div>
-    </template>
-  </main>
+      <template v-else-if="view === 'loading'">
+        <img class="logo logo-sm" :src="logoUrl" alt="应用 logo" />
+        <div class="spinner" aria-hidden="true"></div>
+        <p class="title">正在加载应用…</p>
+        <p class="hint">{{ url }}</p>
+      </template>
+
+      <template v-else-if="view === 'offline'">
+        <h1 class="title">网络连接失败</h1>
+        <p class="error" v-if="error">{{ error }}</p>
+        <p class="hint">请检查网络连接后重试</p>
+        <div class="btn-row">
+          <button class="retry-btn" type="button" @click="retry">重新加载</button>
+          <button class="back-btn" type="button" @click="goHome">返回地址页</button>
+        </div>
+      </template>
+
+      <!-- remote：远程内容视图覆盖此区域，壳子界面只保留顶部工具栏 -->
+    </main>
+  </div>
 </template>
 
 <style scoped>
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  flex: 0 0 40px;
+  padding: 0 10px;
+  background: #f1f5f9;
+  border-bottom: 1px solid #e2e8f0;
+  user-select: none;
+}
+
+.tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #475569;
+  cursor: pointer;
+  padding: 0;
+}
+
+.tool-btn:hover {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+
+.tool-btn:active {
+  background: #cbd5e1;
+}
+
+.tool-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.tool-url {
+  flex: 1;
+  min-width: 0;
+  margin-left: 4px;
+  font-size: 12px;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .container {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 100vh;
   gap: 12px;
   padding: 24px;
+  min-height: 0;
 }
 
 .logo {

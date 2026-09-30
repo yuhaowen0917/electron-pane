@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, session, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeImage, session, shell, WebContentsView } from 'electron'
 import { join, resolve } from 'path'
 import appIconUrl from './assets/icon.png'
 import { AppConfig, isAllowedOrigin, loadConfig } from './config'
@@ -13,8 +13,12 @@ type AppState = 'loading' | 'ready' | 'offline'
 const APP_NAME = 'Pane'
 /** 自定义协议默认名（可被 config.json 的 protocol 覆盖） */
 const DEFAULT_PROTOCOL = 'pane'
+/** 壳子顶部工具栏高度（渲染层绘制按钮，远程内容视图排布在其下方） */
+const TOOLBAR_HEIGHT = 40
 
 let win: BrowserWindow | null = null
+/** 远程页面容器：独立于窗口自身渲染层，始终位于工具栏下方 */
+let contentView: WebContentsView | null = null
 let quitting = false
 let appState: AppState = 'loading'
 let lastError: string | null = null
@@ -26,6 +30,9 @@ let localPage: LocalPageState | null = 'home'
 
 /** 本地壳子页面状态：home = 地址输入页 */
 type LocalPageState = AppState | 'home'
+
+/** 推送给渲染层的壳子视图状态（remote = 远程页面已就绪，界面只保留工具栏） */
+type ShellView = 'home' | 'loading' | 'offline' | 'remote'
 
 /** 补全协议：无 scheme 时默认按 http 处理（局域网地址常见形态） */
 function normalizeUrl(input: string): string | null {
@@ -92,26 +99,67 @@ function registerProtocolClient(): void {
   }
 }
 
-/** 加载本地壳子页面（home / loading / offline 由渲染层按状态渲染） */
-function showLocalPage(state: LocalPageState): Promise<void> {
-  if (!win) return Promise.resolve()
-  localPage = state
-  if (state !== 'home') appState = state
-  const hash = state
-  const devUrl = process.env['ELECTRON_RENDERER_URL']
-  if (devUrl) return win.loadURL(`${devUrl}/#${hash}`)
-  return win.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+/** 渲染层当前应显示的视图 */
+function shellView(): ShellView {
+  if (localPage === 'home') return 'home'
+  if (localPage === 'offline') return 'offline'
+  return appState === 'ready' ? 'remote' : 'loading'
 }
 
-/** 加载远程 Web 应用（不 await：本地 loading 页会一直显示到远程页面提交） */
+/** 把壳子视图状态推给渲染层（壳子界面常驻，靠推送切换地址页/加载页/离线页） */
+function pushViewState(): void {
+  if (!win || win.isDestroyed()) return
+  win.webContents.send('shell:view', {
+    view: shellView(),
+    url: currentUrl,
+    lastError
+  })
+}
+
+/** 首次加载壳子界面（之后一直常驻，不再重新加载） */
+function loadShellPage(): void {
+  if (!win) return
+  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  if (devUrl) win.loadURL(devUrl).catch(() => {})
+  else win.loadFile(join(__dirname, '../renderer/index.html')).catch(() => {})
+}
+
+/** 切换本地壳子视图：隐藏远程内容视图并通知渲染层 */
+function showLocalView(state: LocalPageState): void {
+  localPage = state
+  if (state !== 'home') appState = state
+  contentView?.setVisible(false)
+  pushViewState()
+}
+
+/** 远程内容视图排布：顶部留给壳子工具栏，其余撑满 */
+function layoutContentView(): void {
+  if (!win || !contentView || win.isDestroyed()) return
+  const { width, height } = win.getContentBounds()
+  contentView.setBounds({
+    x: 0,
+    y: TOOLBAR_HEIGHT,
+    width,
+    height: Math.max(0, height - TOOLBAR_HEIGHT)
+  })
+}
+
+/**
+ * 加载远程 Web 应用。
+ * 先隐藏内容视图并显示壳子的 loading 页，远程页面加载完成后再显示视图，避免白屏。
+ */
 function loadTarget(): void {
-  if (!win || !currentUrl) return
+  if (!contentView || !currentUrl) return
   localPage = null
   appState = 'loading'
   lastError = null
-  win.loadURL(currentUrl).catch(() => {
+  contentView.setVisible(false)
+  pushViewState()
+  contentView.webContents.loadURL(currentUrl).catch(() => {
     // 失败会走 did-fail-load，这里只吞掉 unhandled rejection
   })
+  // 兜底：个别页面 dom-ready 迟迟不来时，超时后也把内容视图显示出来，避免一直停在加载页
+  setTimeout(showContentViewIfReady, 8000)
 }
 
 /** 记录为当前目标、写入历史并加载（用户输入、协议链接、历史选择都走这里） */
@@ -129,8 +177,8 @@ function allowedOrigins(): string[] {
 /** 返回地址输入页（中断进行中的加载，保留 currentUrl 供下次重试/预填） */
 function backToHome(): void {
   if (!win) return
-  win.webContents.stop()
-  showLocalPage('home').catch(() => {})
+  contentView?.webContents.stop()
+  showLocalView('home')
 }
 
 /**
@@ -266,13 +314,13 @@ function parsePopupSize(features: string): { width?: number; height?: number } {
 }
 
 /**
- * 导航治理（主窗口与子窗口共用）：
+ * 导航治理（远程内容视图与子窗口共用）：
  * - 站内 / about:blank 的 window.open → 创建真正的子窗口
  * - 站外 http(s) / mailto / tel → 交系统默认浏览器
  * - 页面内导航逃逸出白名单来源 → 阻断并转系统浏览器
  */
-function registerNavigationGuards(target: BrowserWindow): void {
-  target.webContents.setWindowOpenHandler(({ url, features }) => {
+function registerNavigationGuards(wc: Electron.WebContents): void {
+  wc.setWindowOpenHandler(({ url, features }) => {
     if (isAllowedOrigin(url, allowedOrigins()) || url === 'about:blank') {
       return {
         action: 'allow',
@@ -281,7 +329,7 @@ function registerNavigationGuards(target: BrowserWindow): void {
           minWidth: 400,
           minHeight: 300,
           show: false,
-          autoHideMenuBar: false,
+          autoHideMenuBar: true,
           icon: windowIcon(),
           webPreferences: sharedWebPreferences()
         }
@@ -292,21 +340,22 @@ function registerNavigationGuards(target: BrowserWindow): void {
   })
 
   // Electron 创建子窗口后：纳入管理、就绪再显示，并同样施加导航守卫、快捷键、悬浮控件
-  target.webContents.on('did-create-window', (child) => {
+  wc.on('did-create-window', (child) => {
     childWindows.add(child)
     child.on('closed', () => childWindows.delete(child))
     child.once('ready-to-show', () => child.show())
-    registerNavigationGuards(child)
-    registerShortcuts(child)
+    registerNavigationGuards(child.webContents)
+    registerShortcuts(child.webContents)
     child.webContents.on('did-finish-load', () => {
       const current = child.webContents.getURL()
       if (current && isAllowedOrigin(current, allowedOrigins())) {
+        // 子窗口没有顶部工具栏，仍用页面内悬浮控件（刷新 + 关闭窗口）
         injectFloatingControls(child.webContents, 'child')
       }
     })
   })
 
-  target.webContents.on('will-navigate', (e, url) => {
+  wc.on('will-navigate', (e, url) => {
     if (!isAllowedOrigin(url, allowedOrigins())) {
       e.preventDefault()
       if (/^https?:/i.test(url)) shell.openExternal(url)
@@ -342,47 +391,69 @@ function toggleDevToolsFrom(target: BrowserWindow | null): void {
  * 主快捷键走菜单（见 menu.ts）：F5 刷新、Ctrl+Shift+R 强制刷新、Alt+Left 返回地址页、F12 开发者工具。
  * 这里只处理菜单未覆盖的组合键，避免与菜单加速度重复触发。
  */
-function registerShortcuts(target: BrowserWindow): void {
-  target.webContents.on('before-input-event', (e, input) => {
+function registerShortcuts(wc: Electron.WebContents): void {
+  wc.on('before-input-event', (e, input) => {
     if (input.type !== 'keyDown' || !input.control) return
     const key = input.key.toLowerCase()
     if (input.shift && key === 'i') {
       e.preventDefault()
-      target.webContents.toggleDevTools()
+      wc.toggleDevTools()
     } else if (!input.shift && key === 'r') {
       e.preventDefault()
-      target.webContents.reload()
+      wc.reload()
     }
   })
 }
 
-function registerWindowEvents(target: BrowserWindow): void {
-  // 主框架加载失败 → 切到本地离线页（-3 是主动中断，忽略）
-  target.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
+/**
+ * 远程内容就绪 → 显示内容视图（覆盖壳体下方的加载页）。
+ * 用 dom-ready 而不是等 did-finish-load：重型 SPA 的 did-finish-load 可能十几秒才来，
+ * 那样用户会一直盯着加载动画；但加载失败过或已切到本地页时不能显示，避免盖掉离线页。
+ */
+function showContentViewIfReady(): void {
+  if (!contentView || localPage !== null || lastError || appState === 'ready') return
+  appState = 'ready'
+  layoutContentView()
+  contentView.setVisible(true)
+  pushViewState()
+}
+
+/** 远程内容视图的事件：加载状态、导航治理、快捷键 */
+function registerContentViewEvents(): void {
+  if (!contentView) return
+  const wc = contentView.webContents
+
+  // 主框架加载失败 → 显示壳子离线页（-3 是主动中断，忽略）
+  wc.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
     if (isMainFrame && code !== -3) {
       lastError = `错误码 ${code}：${desc}`
-      showLocalPage('offline').catch(() => {})
+      contentView?.setVisible(false)
+      showLocalView('offline')
     }
   })
 
-  // 远程页面加载成功
-  target.webContents.on('did-finish-load', () => {
-    const current = target.webContents.getURL()
-    // 站点重定向（补 www、http→https、跳路径）会落到另一个 origin，
-    // 若不接管最终地址，导航白名单与悬浮控件注入都会以旧地址为基准而失效
+  wc.on('dom-ready', showContentViewIfReady)
+
+  // 远程页面加载完成：接管最终地址（重定向后可能是另一个 origin）
+  wc.on('did-finish-load', () => {
+    const current = wc.getURL()
     if (localPage === null && /^https?:/i.test(current) && current !== currentUrl) {
       currentUrl = current
       addHistory(current)
     }
-    if (current && isAllowedOrigin(current, allowedOrigins())) {
-      appState = 'ready'
-      lastError = null
-      injectFloatingControls(target.webContents, 'main')
-    }
+    showContentViewIfReady()
   })
 
-  registerNavigationGuards(target)
-  registerShortcuts(target)
+  registerNavigationGuards(wc)
+  registerShortcuts(wc)
+}
+
+function registerWindowEvents(target: BrowserWindow): void {
+  // 壳子界面（地址输入页等）也支持调试快捷键
+  registerShortcuts(target.webContents)
+
+  // 窗口尺寸变化时重新排布内容视图
+  target.on('resize', layoutContentView)
 
   // 关闭行为：隐藏到托盘（可配置）
   target.on('close', (e) => {
@@ -404,8 +475,8 @@ function createWindow(autoLoad: boolean): void {
     minWidth: config.minWidth,
     minHeight: config.minHeight,
     show: false,
-    // 顶部常显原生菜单栏（刷新 / 返回地址输入页等）
-    autoHideMenuBar: false,
+    // 本分支由顶部工具栏承担导航入口，菜单栏隐藏（快捷键仍由应用菜单提供）
+    autoHideMenuBar: true,
     title: app.getName(),
     icon: windowIcon(),
     webPreferences: sharedWebPreferences()
@@ -413,25 +484,48 @@ function createWindow(autoLoad: boolean): void {
 
   win = newWin
   if (state.maximized) newWin.maximize()
+
+  // 远程内容视图：独立渲染层，始终位于壳子工具栏下方
+  contentView = new WebContentsView({ webPreferences: sharedWebPreferences() })
+  contentView.setBackgroundColor('#ffffff')
+  contentView.setVisible(false)
+  newWin.contentView.addChildView(contentView)
+  layoutContentView()
+  registerContentViewEvents()
+
   newWin.once('ready-to-show', () => newWin.show())
   registerWindowEvents(newWin)
+  // 壳子界面常驻：首次加载后再也不会被替换
+  loadShellPage()
+  // 等待壳子界面就绪后再推初始状态，避免 send 丢失
+  newWin.webContents.once('did-finish-load', () => pushViewState())
+
   if (autoLoad) {
     // 由 pane:// 链接唤起：跳过地址输入页，直接加载链接里的目标地址
     loadTarget()
-  } else {
-    // 正常启动：先停留在本地地址输入页，由用户确认后再加载远程 URL
-    showLocalPage('home').catch(() => {})
   }
 }
 
 function registerIpc(): void {
   ipcMain.handle('shell:get-state', () => ({
-    state: appState,
+    view: shellView(),
     url: currentUrl,
     lastError
   }))
   ipcMain.handle('shell:retry-load', () => {
-    if (win) loadTarget()
+    loadTarget()
+  })
+  // 工具栏刷新：离线时重试目标地址、远程页刷新自身、地址页刷新壳子界面
+  ipcMain.handle('shell:reload', () => {
+    if (localPage === 'offline') {
+      loadTarget()
+      return
+    }
+    if (localPage === null && contentView) {
+      contentView.webContents.reload()
+      return
+    }
+    win?.webContents.reload()
   })
   // 地址输入页确认跳转：校验 → 记录为当前目标 → 加载
   ipcMain.handle('shell:open-url', (_e, input: unknown) => {

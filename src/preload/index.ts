@@ -6,8 +6,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 const api: NativeShellApi = {
   platform: process.platform,
   versions: process.versions,
-  /** 查询壳子当前状态（loading / ready / offline） */
+  /** 查询壳子当前视图状态（home / loading / offline / remote） */
   getAppState: () => ipcRenderer.invoke('shell:get-state'),
+  /** 订阅主进程推送的视图状态（壳子界面常驻，靠推送切换视图） */
+  onViewChange: (callback) => {
+    ipcRenderer.on('shell:view', (_event, state: ShellViewState) => callback(state))
+  },
+  /** 顶部工具栏：刷新（离线重试 / 远程页刷新 / 地址页刷新） */
+  reloadPage: () => ipcRenderer.invoke('shell:reload'),
   /** 离线页点击重试 */
   retryLoad: () => ipcRenderer.invoke('shell:retry-load'),
   /** 地址输入页确认跳转：校验并加载目标地址，非法地址返回 false */

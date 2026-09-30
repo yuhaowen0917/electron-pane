@@ -9,15 +9,22 @@
  * 3. 字段需与 src/preload/index.ts 中的 api 实现保持一致（实现侧用 NativeShellApi 约束）。
  */
 
+/** 壳子视图状态：remote = 远程页面已就绪（界面只保留顶部工具栏） */
+interface ShellViewState {
+  view: 'home' | 'loading' | 'offline' | 'remote'
+  url: string
+  lastError: string | null
+}
+
 interface NativeShellApi {
   platform: string
   versions: Record<string, string | undefined>
-  /** 查询壳子当前状态（loading / ready / offline） */
-  getAppState: () => Promise<{
-    state: 'loading' | 'ready' | 'offline'
-    url: string
-    lastError: string | null
-  }>
+  /** 查询壳子当前视图状态（home / loading / offline / remote） */
+  getAppState: () => Promise<ShellViewState>
+  /** 订阅主进程推送的视图状态 */
+  onViewChange: (callback: (state: ShellViewState) => void) => void
+  /** 顶部工具栏：刷新（离线重试 / 远程页刷新 / 地址页刷新） */
+  reloadPage: () => Promise<void>
   /** 离线页点击重试 */
   retryLoad: () => Promise<void>
   /** 地址输入页确认跳转：校验并加载目标地址，非法地址返回 false */
