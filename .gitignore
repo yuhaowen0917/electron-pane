@@ -1,0 +1,11 @@
+node_modules/
+_node_modules_broken/
+out/
+release/
+dist/
+config.local.json
+*.log
+*.tsbuildinfo
+# electron-vite / vite 加载 TS 配置时生成的临时文件
+electron.vite.config.*.mjs
+.DS_Store

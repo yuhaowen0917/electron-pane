@@ -1,0 +1,25 @@
+appId: com.example.electronvueapp
+productName: ElectronApp
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - package.json
+  - config.json
+extraResources:
+  - from: config.json
+    to: config.json
+asar: true
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: ElectronApp
