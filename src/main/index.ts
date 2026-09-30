@@ -1,9 +1,15 @@
-import { app, BrowserWindow, ipcMain, nativeImage, session, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, session, shell } from 'electron'
 import { join, resolve } from 'path'
 import appIconUrl from './assets/icon.png'
+import menuDevtoolsDark from './assets/menu/devtools-dark.png'
+import menuDevtoolsLight from './assets/menu/devtools-light.png'
+import menuHomeDark from './assets/menu/home-dark.png'
+import menuHomeLight from './assets/menu/home-light.png'
+import menuRefreshDark from './assets/menu/refresh-dark.png'
+import menuRefreshLight from './assets/menu/refresh-light.png'
 import { AppConfig, isAllowedOrigin, loadConfig } from './config'
 import { addHistory, clearHistory, loadHistory, removeHistory } from './history'
-import { createAppMenu } from './menu'
+import { createAppMenu, MenuActions, MenuIconName } from './menu'
 import { createTray } from './tray'
 import { loadWindowState, saveWindowState } from './windowState'
 
@@ -252,6 +258,17 @@ function windowIcon(): Electron.NativeImage {
   return nativeImage.createFromDataURL(appIconUrl)
 }
 
+/** 菜单项图标：浅色主题用深灰描边、深色主题用浅灰描边，由脚本生成两套 */
+const MENU_ICONS: Record<'light' | 'dark', Record<MenuIconName, string>> = {
+  light: { refresh: menuRefreshLight, home: menuHomeLight, devtools: menuDevtoolsLight },
+  dark: { refresh: menuRefreshDark, home: menuHomeDark, devtools: menuDevtoolsDark }
+}
+
+function menuIcon(name: MenuIconName): Electron.NativeImage {
+  const set = nativeTheme.shouldUseDarkColors ? MENU_ICONS.dark : MENU_ICONS.light
+  return nativeImage.createFromDataURL(set[name])
+}
+
 /** 解析 window.open 的 features 字符串里的宽高（如 "width=480,height=640"） */
 function parsePopupSize(features: string): { width?: number; height?: number } {
   const size: { width?: number; height?: number } = {}
@@ -335,6 +352,19 @@ function backHomeFrom(target: BrowserWindow | null): void {
 function toggleDevToolsFrom(target: BrowserWindow | null): void {
   if (!target || target.isDestroyed()) return
   target.webContents.toggleDevTools()
+}
+
+const menuActions: MenuActions = {
+  reload: reloadWindow,
+  backHome: backHomeFrom,
+  toggleDevTools: toggleDevToolsFrom,
+  icon: menuIcon
+}
+
+/** 建菜单，并跟随系统深浅色主题变化重建以切换图标配色 */
+function setupAppMenu(): void {
+  createAppMenu(menuActions)
+  nativeTheme.on('updated', () => createAppMenu(menuActions))
 }
 
 /**
@@ -504,13 +534,8 @@ function bootstrap(): void {
 
     registerPermissions()
     registerIpc()
-    // 顶部菜单栏：刷新 / 返回地址输入页等导航入口（原生层，不受页面遮挡影响）
-    createAppMenu({
-      reload: reloadWindow,
-      backHome: backHomeFrom,
-      toggleDevTools: toggleDevToolsFrom
-    })
-
+    // 顶部菜单栏：刷新 / 首页等入口（原生层，不受页面遮挡影响）
+    setupAppMenu()
     createWindow(Boolean(protocolTarget))
     createTray(
       () => {
