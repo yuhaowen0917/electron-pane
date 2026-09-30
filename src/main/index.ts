@@ -3,6 +3,7 @@ import { join, resolve } from 'path'
 import appIconUrl from './assets/icon.png'
 import { AppConfig, isAllowedOrigin, loadConfig } from './config'
 import { addHistory, clearHistory, loadHistory, removeHistory } from './history'
+import { createAppMenu } from './menu'
 import { createTray } from './tray'
 import { loadWindowState, saveWindowState } from './windowState'
 
@@ -134,11 +135,16 @@ function backToHome(): void {
 
 /**
  * 生成悬浮控件注入脚本。
- * 主窗口：刷新 + 返回地址输入页；子窗口：刷新 + 关闭窗口。
- * 脚本带自愈能力——页面若移除控件、或后插入同层级元素盖住控件，
- * MutationObserver 会重新挂载并把控件移回最后一位（保证绘制在最上层）。
+ *
+ * 按钮：主窗口为「刷新 + 返回地址输入页」，子窗口为「刷新 + 关闭窗口」。
+ *
+ * 层级策略（保证控件永远在最上层、不被页面遮挡）：
+ * 1. 常态下挂在 documentElement 末尾 + z-index 拉满 —— 同层级时 DOM 靠后者绘制在上层；
+ * 2. 页面出现原生 dialog 模态框或全屏元素时，改挂到这些「顶层元素」内部 ——
+ *    它们位于浏览器 top layer，任何 z-index 都压不过，只有作为其子节点才能一起渲染在顶层；
+ * 3. MutationObserver 负责控件被移除 / 被同层元素插队时自动复位，定时器负责深层变化兜底。
  */
-function floatingControlsScript(mode: 'main' | 'child'): string {
+function floatingControlsScript(mode: 'main' | 'child', expectedOrigin: string): string {
   const secondButton =
     mode === 'main'
       ? `mkBtn('\\u2302', '返回地址输入页 (Alt+Left)', () => {
@@ -148,14 +154,28 @@ function floatingControlsScript(mode: 'main' | 'child'): string {
 
   return `(() => {
     const ID = 'shell-floating-controls'
+    // executeJavaScript 是异步的，排队期间页面可能已经跳转：
+    // 若当前文档不是预期来源（例如已切到本地 loading/offline 页），直接跳过，避免把控件注到错误的页面上
+    if (location.origin !== ${JSON.stringify(expectedOrigin)}) return 'SKIP:' + location.origin
+    // 控件应挂载的宿主：全屏元素 / 原生 dialog 模态框都位于浏览器顶层，
+    // 任何 z-index 都压不过它们，只有作为它们的子节点才能一起渲染在顶层，且排在最后（最上）
+    const hostOf = () =>
+      document.fullscreenElement || document.querySelector('dialog[open]') || document.documentElement
+    const place = () => {
+      const el = document.getElementById(ID)
+      if (!el) return
+      const host = hostOf()
+      if (el.parentElement !== host || el !== host.lastElementChild) host.appendChild(el)
+    }
     const mount = () => {
-      if (document.getElementById(ID)) return
+      if (document.getElementById(ID)) { place(); return }
       const bar = document.createElement('div')
       bar.id = ID
       bar.style.cssText = [
-        'position:fixed', 'top:10px', 'right:10px', 'z-index:2147483647',
-        'display:flex', 'gap:6px', 'opacity:0.6', 'transition:opacity 0.15s',
-        'user-select:none'
+        'position:fixed', 'inset:auto', 'margin:0', 'border:0', 'padding:0',
+        'background:transparent', 'overflow:visible', 'width:auto', 'height:auto',
+        'top:10px', 'right:10px', 'z-index:2147483647', 'display:flex', 'gap:6px',
+        'opacity:0.6', 'transition:opacity 0.15s', 'user-select:none'
       ].join(';')
       bar.addEventListener('mouseenter', () => { bar.style.opacity = '1' })
       bar.addEventListener('mouseleave', () => { bar.style.opacity = '0.6' })
@@ -176,25 +196,39 @@ function floatingControlsScript(mode: 'main' | 'child'): string {
       }
       bar.appendChild(mkBtn('\\u21BB', '刷新页面 (F5)', () => location.reload()))
       bar.appendChild(${secondButton})
-      document.documentElement.appendChild(bar)
+      const host = hostOf()
+      host.appendChild(bar)
+      // 模态框关闭后宿主会隐藏，立即把控件挂回文档根，避免被一起隐藏
+      if (host instanceof HTMLDialogElement) host.addEventListener('close', () => place())
+    }
+    const watchTopLayer = () => {
+      if (window.__shellHostWatcher) return
+      document.addEventListener('fullscreenchange', () => place(), true)
+      window.__shellHostWatcher = setInterval(place, 600)
     }
     mount()
+    watchTopLayer()
     if (!window.__shellControlsObserver) {
       window.__shellControlsObserver = new MutationObserver(() => {
         const el = document.getElementById(ID)
         if (!el) { mount(); return }
-        // 同层级、同 z-index 时 DOM 顺序靠后的绘制在上层，控件必须保持最后一位
-        if (el !== document.documentElement.lastElementChild) {
-          document.documentElement.appendChild(el)
-        }
+        place()
       })
+      // 只监听根节点的直接子节点变化（开销极小）；模态框/全屏等深层变化由 600ms 的定时器兜底
       window.__shellControlsObserver.observe(document.documentElement, { childList: true })
     }
   })()`
 }
 
 function injectFloatingControls(wc: Electron.WebContents, mode: 'main' | 'child'): void {
-  wc.executeJavaScript(floatingControlsScript(mode)).catch(() => {
+  // 以调用时刻的文档来源为准，注入前在页面内二次校验，避免竞态注错页面
+  let expectedOrigin = ''
+  try {
+    expectedOrigin = new URL(wc.getURL()).origin
+  } catch {
+    return
+  }
+  wc.executeJavaScript(floatingControlsScript(mode, expectedOrigin)).catch(() => {
     // 注入失败（如页面跳转中）不影响主流程
   })
 }
@@ -247,7 +281,7 @@ function registerNavigationGuards(target: BrowserWindow): void {
           minWidth: 400,
           minHeight: 300,
           show: false,
-          autoHideMenuBar: true,
+          autoHideMenuBar: false,
           icon: windowIcon(),
           webPreferences: sharedWebPreferences()
         }
@@ -280,26 +314,42 @@ function registerNavigationGuards(target: BrowserWindow): void {
   })
 }
 
+/** 菜单动作：刷新指定窗口（ignoreCache = 强制刷新，忽略缓存） */
+function reloadWindow(target: BrowserWindow | null, ignoreCache = false): void {
+  if (!target || target.isDestroyed()) return
+  if (ignoreCache) target.webContents.reloadIgnoringCache()
+  else target.webContents.reload()
+}
+
+/** 菜单动作：返回地址输入页（从子窗口触发则关闭该子窗口） */
+function backHomeFrom(target: BrowserWindow | null): void {
+  if (target && target !== win && !target.isDestroyed()) {
+    target.close()
+    return
+  }
+  if (localPage === 'home') return
+  backToHome()
+}
+
+/** 菜单动作：切换开发者工具 */
+function toggleDevToolsFrom(target: BrowserWindow | null): void {
+  if (!target || target.isDestroyed()) return
+  target.webContents.toggleDevTools()
+}
+
 /**
- * 快捷键（主窗口与子窗口共用）：
- * - Alt+Left：主窗口回地址输入页；子窗口关闭自身
- * - F12 / Ctrl+Shift+I：切换开发者工具
- * - F5 / Ctrl+R：刷新当前窗口
+ * 补充快捷键。
+ * 主快捷键走菜单（见 menu.ts）：F5 刷新、Ctrl+Shift+R 强制刷新、Alt+Left 返回地址页、F12 开发者工具。
+ * 这里只处理菜单未覆盖的组合键，避免与菜单加速度重复触发。
  */
 function registerShortcuts(target: BrowserWindow): void {
   target.webContents.on('before-input-event', (e, input) => {
-    if (input.type !== 'keyDown') return
+    if (input.type !== 'keyDown' || !input.control) return
     const key = input.key.toLowerCase()
-    if (input.alt && input.key === 'ArrowLeft') {
-      // 主窗口已经停在地址输入页时无需处理
-      if (target === win && localPage === 'home') return
-      e.preventDefault()
-      if (target !== win) target.close()
-      else backToHome()
-    } else if (input.key === 'F12' || (input.control && input.shift && key === 'i')) {
+    if (input.shift && key === 'i') {
       e.preventDefault()
       target.webContents.toggleDevTools()
-    } else if (input.key === 'F5' || (input.control && key === 'r')) {
+    } else if (!input.shift && key === 'r') {
       e.preventDefault()
       target.webContents.reload()
     }
@@ -318,6 +368,12 @@ function registerWindowEvents(target: BrowserWindow): void {
   // 远程页面加载成功
   target.webContents.on('did-finish-load', () => {
     const current = target.webContents.getURL()
+    // 站点重定向（补 www、http→https、跳路径）会落到另一个 origin，
+    // 若不接管最终地址，导航白名单与悬浮控件注入都会以旧地址为基准而失效
+    if (localPage === null && /^https?:/i.test(current) && current !== currentUrl) {
+      currentUrl = current
+      addHistory(current)
+    }
     if (current && isAllowedOrigin(current, allowedOrigins())) {
       appState = 'ready'
       lastError = null
@@ -348,7 +404,8 @@ function createWindow(autoLoad: boolean): void {
     minWidth: config.minWidth,
     minHeight: config.minHeight,
     show: false,
-    autoHideMenuBar: true,
+    // 顶部常显原生菜单栏（刷新 / 返回地址输入页等）
+    autoHideMenuBar: false,
     title: app.getName(),
     icon: windowIcon(),
     webPreferences: sharedWebPreferences()
@@ -447,6 +504,13 @@ function bootstrap(): void {
 
     registerPermissions()
     registerIpc()
+    // 顶部菜单栏：刷新 / 返回地址输入页等导航入口（原生层，不受页面遮挡影响）
+    createAppMenu({
+      reload: reloadWindow,
+      backHome: backHomeFrom,
+      toggleDevTools: toggleDevToolsFrom
+    })
+
     createWindow(Boolean(protocolTarget))
     createTray(
       () => {
