@@ -11,6 +11,10 @@ extraResources:
   - from: config.json
     to: config.json
 asar: true
+protocols:
+  - name: ElectronApp
+    schemes:
+      - myapp
 win:
   icon: build/icon.ico
   target:

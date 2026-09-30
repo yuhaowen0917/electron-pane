@@ -24,6 +24,12 @@ interface NativeShellApi {
   openUrl: (url: string) => Promise<boolean>
   /** 返回地址输入页 */
   backHome: () => Promise<void>
+  /** 历史地址列表（最近打开的排在最前） */
+  getHistory: () => Promise<string[]>
+  /** 删除单条历史，返回删除后的列表 */
+  removeHistory: (url: string) => Promise<string[]>
+  /** 清空历史，返回空列表 */
+  clearHistory: () => Promise<string[]>
 }
 
 interface Window {

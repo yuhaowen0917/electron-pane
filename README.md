@@ -38,14 +38,42 @@ electron-vue3-app/
 - **离线兜底**：主框架加载失败自动切本地离线页，显示错误码 + 「重新加载」按钮（IPC 触发重试）
 - **窗口管理**：单实例锁（二次启动唤起已有窗口）、尺寸/位置记忆（含最大化状态、多屏越界校验）
 - **托盘**：右键菜单（显示主窗口/退出）、双击唤起、点 X 隐藏到托盘（`closeToTray` 可关）
-- **导航治理**：站外链接/新窗口一律交系统浏览器；`will-navigate` 防导航逃逸；权限白名单（notifications 等）
+- **导航治理**：站内链接（含同一主域的子域，如 `app.example.com` ↔ `sso.example.com`）在应用内开新窗口；跨主域链接交系统浏览器；`will-navigate` 防导航逃逸；权限白名单（notifications 等）。判定要求协议与端口一致，`co.uk` 这类二级后缀已做归并处理
+- **悬浮控件**：远程页面右上角注入刷新 / 返回按钮（主窗口为「返回地址输入页」，子窗口为「关闭窗口」）；带自愈能力，页面移除控件或被高 z-index 顶栏盖住时自动复位到最上层
+- **快捷键**：`F5` / `Ctrl+R` 刷新、`F12` / `Ctrl+Shift+I` 开发者工具、`Alt+←` 主窗口回地址页（子窗口则关闭自身）
 - **安全基线**：`contextIsolation: true`、`nodeIntegration: false`，渲染进程只能通过 `window.nativeShell` 白名单桥访问原生能力
 
 ## 改 URL 的方式
 
-开发/演示：直接改项目根目录 `config.json` 的 `url` 字段（或建 `config.local.json`，git 可忽略）。
+日常使用：应用启动后停在本地「地址输入页」，输入地址点「打开」即可跳转；`Alt+←` 或远程页右上角悬浮按钮可回到输入页换地址。
+
+输入框内可一键清空（右侧 ✕ 或按 `Esc`）；下方「历史记录」列出最近打开过的地址，点条目直接打开，可单条删除（✕）或「清空全部」。历史最多保留 20 条，存于 `%APPDATA%/<应用名>/url-history.json`。
+
+开发/演示：直接改项目根目录 `config.json` 的 `url` 字段（或建 `config.local.json`，git 可忽略）作为输入页的预填默认值。
 
 打包后：安装目录 `resources/config.json` 或 exe 同目录放一份 `config.json` 即可覆盖，壳子不用重新打包。
+
+## 用链接直接唤起应用本体（自定义协议）
+
+壳子注册了 `myapp://` 协议（协议名由 `config.json` 的 `protocol` 字段控制），可以在浏览器、文档或「运行」窗口里用链接直接打开桌面应用并指定加载地址：
+
+| 写法 | 说明 |
+|------|------|
+| `myapp://open?url=https%3A%2F%2Fexample.com` | 推荐：地址需 `encodeURIComponent`，避免 `?` `&` 被解析成协议参数 |
+| `myapp://open/example.com` | 路径写法，地址可省略协议（自动补 `http://`） |
+| `myapp://example.com` | 最简写法 |
+
+行为：
+
+- 应用**未启动** → 冷启动并直接加载链接里的地址（跳过地址输入页）
+- 应用**已启动** → 单实例锁唤起已有窗口，并切换到链接里的地址
+- 非 http(s) 协议、或地址非法的链接会被忽略，应用不做任何跳转
+
+注册方式：
+
+- 开发态：主进程启动时调用 `setAsDefaultProtocolClient`，写入 `HKCU\Software\Classes\myapp`，命令行形如 `electron.exe "<项目路径>" "%1"`
+- 打包后：由 `electron-builder.yml` 的 `protocols` 在安装时注册到系统
+- 移除注册（开发态）：`reg delete HKCU\Software\Classes\myapp /f`
 
 ## 下一步（M3 / M4）
 

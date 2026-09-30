@@ -1,5 +1,6 @@
 {
   "url": "https://example.com",
+  "protocol": "myapp",
   "width": 1280,
   "height": 800,
   "minWidth": 960,

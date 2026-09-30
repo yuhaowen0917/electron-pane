@@ -6,6 +6,8 @@ import defaultConfig from '../../config.json'
 export interface AppConfig {
   /** 远程 Web 应用地址（壳子加载的 URL） */
   url: string
+  /** 自定义协议名：通过 myapp:// 链接唤起桌面应用本体（不需带 ://） */
+  protocol: string
   width: number
   height: number
   minWidth: number
@@ -52,11 +54,78 @@ export function loadConfig(): AppConfig {
   return { ...defaultConfig, ...Object.assign({}, ...overrides) } as AppConfig
 }
 
-/** 判断目标 URL 是否属于允许导航的来源（allowedOrigins：当前目标地址 + 额外白名单） */
+/**
+ * 常见二级公共后缀：命中时主域取三段（如 a.example.co.uk 的主域是 example.co.uk），
+ * 避免把 co.uk 当成主域导致不同站点被误判为同一家。
+ */
+const SECOND_LEVEL_SUFFIXES = new Set([
+  'co.uk',
+  'org.uk',
+  'gov.uk',
+  'ac.uk',
+  'com.cn',
+  'net.cn',
+  'org.cn',
+  'gov.cn',
+  'edu.cn',
+  'com.hk',
+  'com.tw',
+  'com.au',
+  'co.jp',
+  'co.kr',
+  'com.sg',
+  'com.br'
+])
+
+const IPV4_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$/
+
+/**
+ * 取 host 的主域（注册域的近似值）：
+ * www.example.com → example.com；a.sso.example.com → example.com；a.example.co.uk → example.co.uk。
+ * localhost、IP、单段内网名不做归并，按原样返回。
+ */
+function primaryDomain(host: string): string {
+  const h = host.toLowerCase()
+  if (!h || h === 'localhost' || IPV4_PATTERN.test(h) || h.includes(':')) return h
+  const parts = h.split('.')
+  if (parts.length <= 2) return h
+  const lastTwo = parts.slice(-2).join('.')
+  return SECOND_LEVEL_SUFFIXES.has(lastTwo) ? parts.slice(-3).join('.') : lastTwo
+}
+
+/** 端口归一：显式 :443 / :80 与默认端口视为等价 */
+function effectivePort(url: URL): string {
+  if (url.port) return url.port
+  if (url.protocol === 'https:') return '443'
+  if (url.protocol === 'http:') return '80'
+  return ''
+}
+
+/**
+ * 是否属于同一站点：协议与端口一致，且 host 相同或同属一个主域。
+ * 例：app.example.com 与 sso.example.com 视为站内（SSO/子应用跳转不会被甩到浏览器）。
+ */
+function isSameSite(target: URL, base: URL): boolean {
+  if (target.protocol !== base.protocol) return false
+  if (effectivePort(target) !== effectivePort(base)) return false
+  if (target.hostname === base.hostname) return true
+  return primaryDomain(target.hostname) === primaryDomain(base.hostname)
+}
+
+/**
+ * 判断目标 URL 是否属于允许导航的来源（allowedOrigins：当前目标地址 + 额外白名单）。
+ * 匹配规则：同 origin，或同一主域下的子域（协议、端口需一致）。
+ */
 export function isAllowedOrigin(targetUrl: string, allowedOrigins: string[]): boolean {
+  let target: URL
+  try {
+    target = new URL(targetUrl)
+  } catch {
+    return false
+  }
   return allowedOrigins.some((base) => {
     try {
-      return new URL(targetUrl).origin === new URL(base).origin
+      return isSameSite(target, new URL(base))
     } catch {
       return false
     }

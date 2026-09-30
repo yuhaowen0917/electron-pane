@@ -13,7 +13,13 @@ const api: NativeShellApi = {
   /** 地址输入页确认跳转：校验并加载目标地址，非法地址返回 false */
   openUrl: (url) => ipcRenderer.invoke('shell:open-url', url),
   /** 返回地址输入页 */
-  backHome: () => ipcRenderer.invoke('shell:back-home')
+  backHome: () => ipcRenderer.invoke('shell:back-home'),
+  /** 历史地址列表（最近打开的排在最前） */
+  getHistory: () => ipcRenderer.invoke('shell:list-history'),
+  /** 删除单条历史，返回删除后的列表 */
+  removeHistory: (url) => ipcRenderer.invoke('shell:remove-history', url),
+  /** 清空历史，返回空列表 */
+  clearHistory: () => ipcRenderer.invoke('shell:clear-history')
 }
 
 contextBridge.exposeInMainWorld('nativeShell', api)
