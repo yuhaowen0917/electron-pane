@@ -6,7 +6,7 @@ import defaultConfig from '../../config.json'
 export interface AppConfig {
   /** 远程 Web 应用地址（壳子加载的 URL） */
   url: string
-  /** 自定义协议名：通过 myapp:// 链接唤起桌面应用本体（不需带 ://） */
+  /** 自定义协议名：通过 pane:// 链接唤起桌面应用本体（不需带 ://） */
   protocol: string
   width: number
   height: number

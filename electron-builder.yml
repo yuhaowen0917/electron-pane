@@ -1,5 +1,5 @@
-appId: com.example.electronvueapp
-productName: ElectronApp
+appId: com.pane.desktop
+productName: Pane
 directories:
   buildResources: build
   output: release
@@ -12,9 +12,9 @@ extraResources:
     to: config.json
 asar: true
 protocols:
-  - name: ElectronApp
+  - name: Pane
     schemes:
-      - myapp
+      - pane
 win:
   icon: build/icon.ico
   target:
@@ -26,4 +26,4 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
-  shortcutName: ElectronApp
+  shortcutName: Pane

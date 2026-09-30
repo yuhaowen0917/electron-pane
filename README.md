@@ -1,25 +1,34 @@
-# Electron + Vite + Vue3 伪桌面应用壳子
+# Pane（窗格）
 
-按《Electron 壳子设计方案》实现的 M1 + M2 阶段：配置驱动加载远程 URL、本地 loading/离线页、托盘、窗口记忆、外链拦截。
+一扇「窗格」——把 Web 应用装进原生窗口的那层玻璃。英文名简短好记，中文名「窗格」直接点出「壳」的本质，也和 Electron（电子）的极客气质相配。
+
+按《Electron 壳子设计方案》实现：配置驱动加载远程 URL、地址输入页与历史记录、本地 loading/离线页、托盘、窗口记忆、导航治理、`pane://` 协议唤起。
+
+## Logo
+
+靛蓝渐变的 squircle 底（`#4F46E5` → `#1E1B4B`，左上带柔光），前景是三层叠起的玻璃窗格：最前面一张白色窗口卡片，带 macOS 红绿灯标题栏和模拟的正文内容线；身后两张半透明卡片渐次右上偏移、隐没——寓意「网页套进桌面壳，层层封装」。
+
+矢量源文件在 `src/renderer/src/assets/logo.svg`，图标源图在 `build/icon-source.png`。
 
 ## 目录结构
 
 ```
-electron-vue3-app/
+pane/
 ├── electron.vite.config.ts   # electron-vite 配置（main / preload / renderer 三段）
 ├── electron-builder.yml      # 打包配置（NSIS + 图标 + extraResources）
-├── config.json               # 壳子默认配置（URL、窗口尺寸、行为开关）
-├── scripts/gen_icons.py      # 图标生成脚本（纯标准库，可重新生成）
+├── config.json               # 壳子默认配置（URL、协议名、窗口尺寸、行为开关）
+├── scripts/make_icons.ps1    # 图标生成脚本（源图 → 各尺寸图标）
 ├── src/
 │   ├── main/                 # 主进程
 │   │   ├── index.ts          # 窗口/生命周期/事件/IPC/权限白名单
 │   │   ├── config.ts         # 配置加载（默认 → resources → exe 同目录 → userData）
 │   │   ├── windowState.ts    # 窗口尺寸/位置记忆
 │   │   ├── tray.ts           # 系统托盘
-│   │   └── assets/tray.png   # 托盘图标
+│   │   └── assets/           # 运行时图标（icon.png 窗口 / tray.png 托盘）
 │   ├── preload/              # contextBridge 白名单桥（window.nativeShell）
-│   └── renderer/             # Vue3 渲染层：loading / offline 两态页面
-└── build/                    # 打包图标（icon.ico / icon.png）
+│   └── renderer/             # Vue3 渲染层：地址输入 / loading / offline 页面
+│       └── src/assets/logo.svg   # 界面 logo（地址输入页、加载页）
+└── build/                    # 打包资源（icon-source.png 源图、icon.ico / icon.png）
 ```
 
 ## 常用命令
@@ -30,6 +39,25 @@ electron-vue3-app/
 | `npm run build` | 构建产物到 out/ |
 | `npm run dist` | 构建 + 打 NSIS 安装包（release/） |
 | `npm run typecheck` | 主进程/渲染层 TS 类型检查 |
+
+## 图标与 Logo
+
+| 文件 | 用途 |
+|------|------|
+| `build/icon-source.png` | 设计源图（1024×1024），所有图标的来源 |
+| `build/icon.ico` | Windows 打包图标（16/32/48/64/128/256 多尺寸） |
+| `build/icon.png` | 非 Windows 平台打包图标（256） |
+| `src/main/assets/icon.png` | 运行时窗口 / 任务栏图标（256） |
+| `src/main/assets/tray.png` | 系统托盘图标（32） |
+| `src/renderer/src/assets/logo.svg` | 界面 logo（地址输入页、加载页） |
+
+替换图标：用新的方形源图覆盖 `build/icon-source.png`，然后执行
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make_icons.ps1
+```
+
+脚本基于 System.Drawing 做高质量缩放，并把 6 个尺寸以 PNG 载荷写入 `icon.ico`（Vista 及以上支持）。界面 logo 直接替换 `src/renderer/src/assets/logo.svg` 即可，Vite 会把它内联进渲染层产物。
 
 ## 已实现能力（M1 + M2）
 
@@ -55,13 +83,13 @@ electron-vue3-app/
 
 ## 用链接直接唤起应用本体（自定义协议）
 
-壳子注册了 `myapp://` 协议（协议名由 `config.json` 的 `protocol` 字段控制），可以在浏览器、文档或「运行」窗口里用链接直接打开桌面应用并指定加载地址：
+Pane 注册了 `pane://` 协议（协议名由 `config.json` 的 `protocol` 字段控制），可以在浏览器、文档或「运行」窗口里用链接直接打开桌面应用并指定加载地址：
 
 | 写法 | 说明 |
 |------|------|
-| `myapp://open?url=https%3A%2F%2Fexample.com` | 推荐：地址需 `encodeURIComponent`，避免 `?` `&` 被解析成协议参数 |
-| `myapp://open/example.com` | 路径写法，地址可省略协议（自动补 `http://`） |
-| `myapp://example.com` | 最简写法 |
+| `pane://open?url=https%3A%2F%2Fexample.com` | 推荐：地址需 `encodeURIComponent`，避免 `?` `&` 被解析成协议参数 |
+| `pane://open/example.com` | 路径写法，地址可省略协议（自动补 `http://`） |
+| `pane://example.com` | 最简写法 |
 
 行为：
 
@@ -71,9 +99,9 @@ electron-vue3-app/
 
 注册方式：
 
-- 开发态：主进程启动时调用 `setAsDefaultProtocolClient`，写入 `HKCU\Software\Classes\myapp`，命令行形如 `electron.exe "<项目路径>" "%1"`
+- 开发态：主进程启动时调用 `setAsDefaultProtocolClient`，写入 `HKCU\Software\Classes\pane`，命令行形如 `electron.exe "<项目路径>" "%1"`
 - 打包后：由 `electron-builder.yml` 的 `protocols` 在安装时注册到系统
-- 移除注册（开发态）：`reg delete HKCU\Software\Classes\myapp /f`
+- 移除注册（开发态）：`reg delete HKCU\Software\Classes\pane /f`
 
 ## 下一步（M3 / M4）
 

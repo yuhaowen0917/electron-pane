@@ -1,11 +1,17 @@
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeImage, session, shell } from 'electron'
 import { join, resolve } from 'path'
+import appIconUrl from './assets/icon.png'
 import { AppConfig, isAllowedOrigin, loadConfig } from './config'
 import { addHistory, clearHistory, loadHistory, removeHistory } from './history'
 import { createTray } from './tray'
 import { loadWindowState, saveWindowState } from './windowState'
 
 type AppState = 'loading' | 'ready' | 'offline'
+
+/** 应用显示名：窗口标题、托盘提示、userData 目录都取它 */
+const APP_NAME = 'Pane'
+/** 自定义协议默认名（可被 config.json 的 protocol 覆盖） */
+const DEFAULT_PROTOCOL = 'pane'
 
 let win: BrowserWindow | null = null
 let quitting = false
@@ -36,14 +42,14 @@ function normalizeUrl(input: string): string | null {
 
 /** 自定义协议名（config.json 的 protocol 字段） */
 function protocolScheme(): string {
-  return config?.protocol || 'myapp'
+  return config?.protocol || DEFAULT_PROTOCOL
 }
 
 /**
  * 解析协议链接里的目标地址，支持三种写法：
- * - myapp://open?url=<encodeURIComponent 后的完整地址>  （推荐，避免地址里的 ? & 冲突）
- * - myapp://open/<地址>
- * - myapp://<地址>
+ * - pane://open?url=<encodeURIComponent 后的完整地址>  （推荐，避免地址里的 ? & 冲突）
+ * - pane://open/<地址>
+ * - pane://<地址>
  */
 function parseProtocolTarget(raw: string): string | null {
   const scheme = protocolScheme()
@@ -72,7 +78,7 @@ function findProtocolTarget(argv: readonly string[]): string | null {
   return null
 }
 
-/** 注册协议处理程序，使系统能把 myapp:// 链接路由到本应用 */
+/** 注册协议处理程序，使系统能把 pane:// 链接路由到本应用 */
 function registerProtocolClient(): void {
   const scheme = protocolScheme()
   if (process.defaultApp) {
@@ -207,6 +213,11 @@ function sharedWebPreferences(): Electron.WebPreferences {
   }
 }
 
+/** 窗口/任务栏图标（资源被 electron-vite 内联为 data URL） */
+function windowIcon(): Electron.NativeImage {
+  return nativeImage.createFromDataURL(appIconUrl)
+}
+
 /** 解析 window.open 的 features 字符串里的宽高（如 "width=480,height=640"） */
 function parsePopupSize(features: string): { width?: number; height?: number } {
   const size: { width?: number; height?: number } = {}
@@ -237,6 +248,7 @@ function registerNavigationGuards(target: BrowserWindow): void {
           minHeight: 300,
           show: false,
           autoHideMenuBar: true,
+          icon: windowIcon(),
           webPreferences: sharedWebPreferences()
         }
       }
@@ -338,6 +350,7 @@ function createWindow(autoLoad: boolean): void {
     show: false,
     autoHideMenuBar: true,
     title: app.getName(),
+    icon: windowIcon(),
     webPreferences: sharedWebPreferences()
   })
 
@@ -346,7 +359,7 @@ function createWindow(autoLoad: boolean): void {
   newWin.once('ready-to-show', () => newWin.show())
   registerWindowEvents(newWin)
   if (autoLoad) {
-    // 由 myapp:// 链接唤起：跳过地址输入页，直接加载链接里的目标地址
+    // 由 pane:// 链接唤起：跳过地址输入页，直接加载链接里的目标地址
     loadTarget()
   } else {
     // 正常启动：先停留在本地地址输入页，由用户确认后再加载远程 URL
@@ -402,7 +415,7 @@ function quitApp(): void {
 }
 
 function bootstrap(): void {
-  // 单实例锁：二次启动唤起已有窗口；若由 myapp:// 链接唤起则顺带加载链接里的地址
+  // 单实例锁：二次启动唤起已有窗口；若由 pane:// 链接唤起则顺带加载链接里的地址
   app.on('second-instance', (_event, argv) => {
     if (win) {
       if (win.isMinimized()) win.restore()
@@ -423,13 +436,14 @@ function bootstrap(): void {
   })
 
   app.whenReady().then(() => {
+    // 必须先定应用名再读配置：userData 目录（配置覆盖、窗口状态、历史记录）都依赖它
+    app.setName(APP_NAME)
     config = loadConfig()
     registerProtocolClient()
     // 冷启动时若带着协议链接，直接加载其中的地址（跳过地址输入页）
     const protocolTarget = findProtocolTarget(process.argv)
     currentUrl = protocolTarget ?? config.url
     if (protocolTarget) addHistory(protocolTarget)
-    app.setName('ElectronApp')
 
     registerPermissions()
     registerIpc()

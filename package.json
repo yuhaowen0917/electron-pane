@@ -1,7 +1,7 @@
 {
-  "name": "electron-vue3-app",
+  "name": "pane",
   "version": "0.1.0",
-  "description": "Electron + Vite + Vue3 桌面应用壳子",
+  "description": "Pane（窗格）：把 Web 应用装进原生窗口的 Electron 壳子",
   "main": "./out/main/index.js",
   "author": "workbuddy",
   "private": true,

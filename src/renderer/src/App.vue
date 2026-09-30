@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import logoUrl from './assets/logo.svg'
 
 type ViewState = 'home' | 'loading' | 'offline'
 
@@ -103,6 +104,7 @@ function backHome(): void {
 <template>
   <main class="container">
     <template v-if="view === 'home'">
+      <img class="logo" :src="logoUrl" alt="应用 logo" />
       <h1 class="title">输入应用地址</h1>
       <form class="address-form" @submit.prevent="openAddress">
         <div class="input-wrap">
@@ -153,6 +155,7 @@ function backHome(): void {
     </template>
 
     <template v-else-if="view === 'loading'">
+      <img class="logo logo-sm" :src="logoUrl" alt="应用 logo" />
       <div class="spinner" aria-hidden="true"></div>
       <p class="title">正在加载应用…</p>
       <p class="hint">{{ url }}</p>
@@ -179,6 +182,19 @@ function backHome(): void {
   min-height: 100vh;
   gap: 12px;
   padding: 24px;
+}
+
+.logo {
+  width: 72px;
+  height: 72px;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.logo-sm {
+  width: 56px;
+  height: 56px;
+  margin-bottom: 4px;
 }
 
 .title {
